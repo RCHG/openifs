@@ -1,3 +1,11 @@
+# (C) Copyright 2011- ECMWF.
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction
+
 #
 #
 #   oifs-config.edit_me.sh
@@ -19,60 +27,49 @@ export OIFS_PLATFORM="hpc2020"
 #--- if OIFS_DEBUGGER is set, oifs-run can use it to activate debugger ---------
 export OIFS_DEBUGGER="DDT"
 
-#--- set principal OIFS variables ------------------------------
-#
-# CUSTOMIZED FOR USER NLD5163
-#
-# CODE  ----> stored in $PERM/openifs/oifs_code/branch_name/openifs-48r1
-# DATA  ----> stored in $PERM/openifs/oifs_data/CYCLE/  
-# EXPS  ----> stored in $PERM/openifs/oifs_exps/CYCLE/
-#
-# This file is therefore adapted to this particular workflow
-#
-#
-#
-#
+#--- set principal OIFS variables ----------------------------------------------
 
-branch_path="$(pwd)"         # We run this script in its directoryr
-old=$IFS
-IFS=$IFS"/"                  # We will split path in char "/". IFS variable is bash stuff.
-array_path=()                # Initialize array to empty
-for i in $branch_path; do    # We fill array with elements 
-    array_path+=($i)
-done   
-IFS=$old 
-
-branch_name=${array_path[4]} # In my current setting branch_name is in position 3 (from 0)
-echo 
-echo "Selecting the branch as: "$branch_name
 export OIFS_CYCLE=48r1
+export OIFS_CLIMATE="climate.v020"
 
-#---Base code assumes openifs-48r1 and openifs-expt are installed
+#---Base code assumes openifs and openifs-expt are installed
 #---in $HOME. Either these can be changed by the user------------
+export OIFS_HOME="${PERM}/openifs/oifs_code/stable/openifs/"
 
-export OIFS_HOME="${PERM}/openifs/oifs_code/"$branch_name"/openifs-48r1"
+#---Central location for non-openifs bundle source code, which
+#---is required for the build and run. This only needs to be set
+#---if not using the standard download of source to OIFS_HOME.
+export OIFS_CENTRAL_SRC="${PERM}/openifs/oifs_code/stable/openifs-central-src/"
 
 #---It is recommended that the openifs-expt and oifs_data dir
 #---exist in a location designed for permanent storage-----------
-export OIFS_EXPT="${PERM}/openifs/oifs_exps"/${OIFS_CYCLE} 
-export OIFS_DATA_DIR="${HPCPERM}/openifs/oifs_data/"${OIFS_CYCLE}
+export OIFS_EXPT="${HOME}/openifs-expt"
+export OIFS_DATA_DIR="${OIFS_HOME}/openifs-data"
 
 #---Set the path for the arch directory. Depending on system,i.e.,
 #---all libs are installed on the sytem, this is not required,
 #---so set to an empty string OIFS_ARCH=""
-#export OIFS_ARCH="./arch/ecmwf/hpc2020/gnu/"
-export OIFS_ARCH="./arch/ecmwf/hpc2020/"
+export OIFS_ARCH="./arch/${OIFS_HOST}/${OIFS_PLATFORM}"
+
+#---Set the path for the directory that contains bin and share,
+#---both of which are produced by the OpenIFS build. As standard,
+#---this will be build, but can be install if -i option is used
+#---in the build process.
+export OIFS_BLD_PARENT="${OIFS_HOME}/build"
 
 #---Path to the executable for 3d global model. This is the
 #---default path for the exe, produced by openifs-test.sh.
-#---DP means double precision. To run single precision change
-#---DP to SP
-export OIFS_EXEC="${OIFS_HOME}/build/bin/ifsMASTER.DP"
+#---SP means single precision. To run double precision change
+#---SP to DP
+export OIFS_EXEC="${OIFS_BLD_PARENT}/bin/ifsMASTER.SP"
 
 #---Default assumed paths, only change if you know what you are doing
+#---Path to the build script openifs-test.sh
 export OIFS_TEST="${OIFS_HOME}/scripts/build_test"
+#---Path to log for openifs-test.sh  script
+export OIFS_LOGFILE="${OIFS_HOME}/openifs-test.log"
+#---Path to dir containing scripts to run OpenIFS experiment
 export OIFS_RUN_SCRIPT="${OIFS_HOME}/scripts/exp_3d"
-export OIFS_LOGFILE="${OIFS_HOME}/oifs_test_log.txt"
 
 alias oenv="env -0 | sort -z | tr '\0' '\n' | grep -a OIFS_"
 
@@ -85,13 +82,13 @@ echo
 #---default path for the exe, produced by openifs-test.sh.
 #---DP means double precision. To run single precision change
 #---DP to SP
-export SCM_EXEC="${OIFS_HOME}/build/bin/MASTER_scm.DP"
+export SCM_EXEC="${OIFS_BLD_PARENT}/bin/MASTER_scm.SP"
 
 #---Default assumed paths, only change if you know what you are doing
 export SCM_TEST="${OIFS_HOME}/scripts/scm"
-export SCM_RUNDIR="${OIFS_EXPT}/scm_openifs/48r1/scm-projects/ref48r1"
-export SCM_PROJDIR="${OIFS_EXPT}/scm_openifs/48r1/scm-projects"
 export SCM_VERSIONDIR="${OIFS_EXPT}/scm_openifs/48r1"
+export SCM_PROJDIR="${SCM_VERSIONDIR}/scm-projects"
+export SCM_RUNDIR="${SCM_PROJDIR}/ref48r1"
 export SCM_LOGFILE="${SCM_RUNDIR}/scm_run_log.txt"
 
 alias scm_env="env -0 | sort -z | tr '\0' '\n' | grep -a SCM_"
