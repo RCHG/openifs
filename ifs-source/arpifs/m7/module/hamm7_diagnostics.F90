@@ -38,9 +38,9 @@
 ! │     add the AOD diagnostics and commented by R.Checa-Garcia (KNMI)         │
 ! │ Modifications :                                                            │
 ! │ -------------                                                              │
-! │     Sep.  2026 - R. Checa-Garcia: moved diagnostics to external and added  │
-! │     May.  2024 - R. Checa-Garcia: revision for CY48r1 and refactoring      │
+! │     Sep.  2026 - R. Checa-Garcia: moved diagnostics here, refactor & added │
 ! │                                   a AOD per species/modes/tracers.         │
+! │     Sep.  2026 - R. Checa-Garcia: added AOD also of water as an species.   │
 ! ╰────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -90,9 +90,9 @@ MODULE HAMM7_DIAGNOSTICS
   !   YAEROUT(27)    -> WRITE_SURFACE_DIAGNOSTICS    (gas mixing ratios at surface)
   !   YAEROUT(28)    -> WRITE_EMISSION_DIAGNOSTICS   (emissions)
   !   YAEROUT(29)    -> WRITE_EMISSION_DIAGNOSTICS   (commented "29" but actually writes slot 39 -- see note there)
-  !   YAEROUT(30)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per M7 mode @550nm)
-  !   YAEROUT(31)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per tracer @550nm)
-  !   YAEROUT(32)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per chemical species @550nm)
+  !   YAEROUT(30)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per M7 mode @550nm, or other WL in NAERO_WVL_DIAG)
+  !   YAEROUT(31)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per tracer @550nm, or other WL in NAERO_WVL_DIAG)
+  !   YAEROUT(32)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per chemical species @550nm, or other WL in NAERO_WVL_DIAG)
   !   YAEROUT(33-38) -> empty ("--" placeholder comments only)
   !   YAEROUT(39)    -> WRITE_EMISSION_DIAGNOSTICS   (actual target of YAEROUT(29)'s write, see above)
   !   YAEROUT(40-45) -> commented-out (SimChem: ZFSO2/ZFSO4/ZFSO4_AQ/ZTSO4/ZTSO4_AQ/ZTSO2)
@@ -121,16 +121,17 @@ CONTAINS
 !-----------------------------------------------------------------------------
   SUBROUTINE WRITE_OPTICAL_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, YDMODEL, &
        & NAEROOPT, NSTEP, NRADFR,                                         &
-       & PAOD_DIAG_MODE, PAOD_DIAG_TRACER, PAOD_DIAG,                     &
+       & PAOD_DIAG_MODE, PAOD_DIAG_TRACER, PAOD_DIAG_WATER, PAOD_DIAG,    &
        & PGFL)
 
     ! YAEROUT(30)/(31)/(32): AOD per M7 mode/tracer/chemical species at
-    ! 550nm, plus the runtime consistency check (sum of any of the three
-    ! must reproduce the total AOD). Moved from HAMM7_INTERFACE's original
-    ! hamm7_interface_struc.F90 describes physics derivation of the inputs.
+    ! 550nm or other WL at NAERO_WVL_DIAG, plus the runtime consistency check 
+    ! (sum of any of the three must reproduce the total AOD). Moved from 
+    ! HAMM7_INTERFACE's original hamm7_interface_struc.F90 describes physics
+    ! derivation of the inputs.
 
     USE TYPE_MODEL,  ONLY: MODEL
-    USE MO_HAM,      ONLY: nclass, naerocomp, aerocomp
+    USE MO_HAM,      ONLY: nclass, naerocomp, aerocomp, aerowater, sizeclass
     USE OIFS_TO_HAM, ONLY: ind_oifs_ham
     USE YOMLUN,      ONLY: NULOUT
 
@@ -141,35 +142,37 @@ CONTAINS
     INTEGER(KIND=JPIM), INTENT(IN)    :: NAEROOPT, NSTEP, NRADFR
     REAL(KIND=JPRB),    INTENT(IN)    :: PAOD_DIAG_MODE(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,nclass)
     REAL(KIND=JPRB),    INTENT(IN)    :: PAOD_DIAG_TRACER(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,naerocomp)
+    REAL(KIND=JPRB),    INTENT(IN)    :: PAOD_DIAG_WATER(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,nclass)
     REAL(KIND=JPRB),    INTENT(IN)    :: PAOD_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
     REAL(KIND=JPRB),    INTENT(INOUT) :: PGFL(KLON,KLEV,YDMODEL%YRML_GCONF%YGFL%NDIM)
 
-    INTEGER(KIND=JPIM) :: JCLASS, JN, JO, ISPID, IW, IW550
+    INTEGER(KIND=JPIM) :: JCLASS, JN, JO, ISPID, IW, IW_STORE, ISPID_WAT
     INTEGER(KIND=JPIM), PARAMETER :: NSPECMAX=20 ! safe upper bound for aerocomp(:)%spid -- same
-                                                  ! value as HAMM7_INTERFACE's own NSPECMAX
+                                                 ! value as HAMM7_INTERFACE's own NSPECMAX
     REAL(KIND=JPRB) :: ZAOD_SUM_MODE(KLON), ZAOD_SUM_TRACER(KLON), ZAOD_SUM_SPECIES(KLON)
     REAL(KIND=JPRB), PARAMETER :: ZAODCHK_TOL=1.0E-6_JPRB
     LOGICAL :: LLAOD_NEG
-    LOGICAL :: LLFOUND550
+    LOGICAL :: LLFOUND_WL
 
     ASSOCIATE(YAEROUT => YDMODEL%YRML_GCONF%YGFL%YAEROUT, &
             & NAERO_WVL_DIAG => YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
 
     IF (MOD(NSTEP,NRADFR) == 0 .AND. NAEROOPT == 2) THEN
 
-      !** YAEROUT(30) : AOD per M7 mode at 550nm
-      ! Normally IW550 is the 1st index, but it is added a checker to be sure 
+      !** YAEROUT(30) : AOD per M7 mode at 550nm (or other value in NAERO_WVL_DIAG) 
+      ! Normally IW_STORE is the 1st index, but it is added a checker to be sure 
       ! in case of silent changes that can break the logic. 
-      IW550 = 1
-      LLFOUND550 = .FALSE.
+      IW_STORE = 1
+      LLFOUND_WL = .FALSE.
       DO IW=1,NAERO_WVL_DIAG
+        ! Replace 550 for the target value 
         IF (YDMODEL%YRML_GCONF%YGFL%YAERO_WVL_DIAG_NL(IW)%IWVL == 550) THEN
-          IW550 = IW
-          LLFOUND550 = .TRUE.
+          IW_STORE = IW
+          LLFOUND_WL = .TRUE.
           EXIT
         ENDIF
       ENDDO
-      IF (.NOT. LLFOUND550) THEN
+      IF (.NOT. LLFOUND_WL) THEN
         WRITE(NULOUT,*) 'HAMM7_INTERFACE WARNING: 550nm not found in YAERO_WVL_DIAG_NL -- ', &
              & 'YAEROUT(30)/(31)/(32) per-mode/tracer/species AOD will use index 1 ', &
              & '(IWVL=', YDMODEL%YRML_GCONF%YGFL%YAERO_WVL_DIAG_NL(1)%IWVL, &
@@ -178,13 +181,13 @@ CONTAINS
       ENDIF
 
       DO JCLASS=1,nclass
-        PGFL(KIDIA:KFDIA, JCLASS, YAEROUT(30)%MP) = PAOD_DIAG_MODE(KIDIA:KFDIA,IW550,JCLASS)
+        PGFL(KIDIA:KFDIA, JCLASS, YAEROUT(30)%MP) = PAOD_DIAG_MODE(KIDIA:KFDIA,IW_STORE,JCLASS)
       END DO
 
       !** YAEROUT(31) : AOD per tracer (naerocomp) at 550nm
       DO JN=1,naerocomp
         JO=ind_oifs_ham%ind_mass_OIFS(JN)
-        PGFL(KIDIA:KFDIA, JO, YAEROUT(31)%MP) = PAOD_DIAG_TRACER(KIDIA:KFDIA,IW550,JN)
+        PGFL(KIDIA:KFDIA, JO, YAEROUT(31)%MP) = PAOD_DIAG_TRACER(KIDIA:KFDIA,IW_STORE,JN)
       END DO
 
       !** YAEROUT(32) : AOD per chemical species at 550nm
@@ -192,30 +195,59 @@ CONTAINS
       DO JN=1,naerocomp
         ISPID=aerocomp(JN)%spid
         PGFL(KIDIA:KFDIA, ISPID, YAEROUT(32)%MP) = PGFL(KIDIA:KFDIA, ISPID, YAEROUT(32)%MP) &
-                                               & + PAOD_DIAG_TRACER(KIDIA:KFDIA,IW550,JN)
+                                               & + PAOD_DIAG_TRACER(KIDIA:KFDIA,IW_STORE,JN)
       END DO
 
-      !** Consistency check
-      ZAOD_SUM_MODE(KIDIA:KFDIA)    = SUM(PAOD_DIAG_MODE(KIDIA:KFDIA,IW550,1:nclass),      DIM=2)
-      ZAOD_SUM_TRACER(KIDIA:KFDIA)  = SUM(PAOD_DIAG_TRACER(KIDIA:KFDIA,IW550,1:naerocomp), DIM=2)
-      ZAOD_SUM_SPECIES(KIDIA:KFDIA) = SUM(PGFL(KIDIA:KFDIA,1:NSPECMAX,YAEROUT(32)%MP),     DIM=2)
-
-      LLAOD_NEG = ANY(PAOD_DIAG_MODE(KIDIA:KFDIA,IW550,1:nclass)      < 0._JPRB) .OR. &
-                & ANY(PAOD_DIAG_TRACER(KIDIA:KFDIA,IW550,1:naerocomp) < 0._JPRB) .OR. &
-                & ANY(PGFL(KIDIA:KFDIA,1:NSPECMAX,YAEROUT(32)%MP)     < 0._JPRB)
-
-      IF (MAXVAL(ABS(ZAOD_SUM_MODE(KIDIA:KFDIA)   -PAOD_DIAG(KIDIA:KFDIA,IW550))) <= ZAODCHK_TOL .AND. &
-        & MAXVAL(ABS(ZAOD_SUM_SPECIES(KIDIA:KFDIA)-PAOD_DIAG(KIDIA:KFDIA,IW550))) <= ZAODCHK_TOL) THEN
-        WRITE(NULOUT,*) 'HAMM7_INTERFACE: comprobada consistencia en AOD sum per modes, and sum per species is consistent with total AOD at 550nm'
+      ! (RChG) Added WAT as a 6th species with SO4/BC/POM/SS/DU. Discussion
+      ! about best implementation might be needed. Currently adding to try to 
+      ! recover the sum per components = total AOD. 
+      ISPID_WAT = -1
+      DO JCLASS=1,nclass
+        IF (sizeclass(JCLASS)%lsoluble) THEN
+          ISPID_WAT = aerowater(JCLASS)%spid
+          EXIT
+        ENDIF
+      END DO
+      IF (ISPID_WAT > 0) THEN
+        PGFL(KIDIA:KFDIA, ISPID_WAT, YAEROUT(32)%MP) = PGFL(KIDIA:KFDIA, ISPID_WAT, YAEROUT(32)%MP) &
+                                                   & + SUM(PAOD_DIAG_WATER(KIDIA:KFDIA,IW_STORE,1:nclass), DIM=2)
       ELSE
-        WRITE(NULOUT,*) 'HAMM7_INTERFACE WARNING: AOD sum per modes or sum per species NOT consistent with total AOD at 550nm', &
-             & ' max|sum_modes-total|=',    MAXVAL(ABS(ZAOD_SUM_MODE(KIDIA:KFDIA)   -PAOD_DIAG(KIDIA:KFDIA,IW550))), &
-             & ' max|sum_tracers-total|=',  MAXVAL(ABS(ZAOD_SUM_TRACER(KIDIA:KFDIA) -PAOD_DIAG(KIDIA:KFDIA,IW550))), &
-             & ' max|sum_species-total|=',  MAXVAL(ABS(ZAOD_SUM_SPECIES(KIDIA:KFDIA)-PAOD_DIAG(KIDIA:KFDIA,IW550)))
+        WRITE(NULOUT,*) 'HAMM7_INTERFACE WARNING: no soluble mode found -- WAT AOD not added to YAEROUT(32)'
       ENDIF
 
+      !** Consistency check
+      ZAOD_SUM_MODE(KIDIA:KFDIA)    = SUM(PAOD_DIAG_MODE(KIDIA:KFDIA,IW_STORE,1:nclass),      DIM=2)
+      ZAOD_SUM_TRACER(KIDIA:KFDIA)  = SUM(PAOD_DIAG_TRACER(KIDIA:KFDIA,IW_STORE,1:naerocomp), DIM=2)
+      ZAOD_SUM_SPECIES(KIDIA:KFDIA) = SUM(PGFL(KIDIA:KFDIA,1:NSPECMAX,YAEROUT(32)%MP),     DIM=2)
+
+      LLAOD_NEG = ANY(PAOD_DIAG_MODE(KIDIA:KFDIA,IW_STORE,1:nclass)      < 0._JPRB) .OR. &
+                & ANY(PAOD_DIAG_TRACER(KIDIA:KFDIA,IW_STORE,1:naerocomp) < 0._JPRB) .OR. &
+                & ANY(PGFL(KIDIA:KFDIA,1:NSPECMAX,YAEROUT(32)%MP)     < 0._JPRB)
+
+      ! (RChG) Sum per modes should match total AOD as aerosol water is included. 
+      ! but split per species is more difficult as waer is not in naerocompo. So, 
+      ! the method aimed to extract water as an special case from mo_ham_rad, by 
+      ! hamm7_interface and include here the values. So we can add as a species, 
+      ! and try to recover the correct sum to total AOD.
+      IF (MAXVAL(ABS(ZAOD_SUM_MODE(KIDIA:KFDIA)   -PAOD_DIAG(KIDIA:KFDIA,IW_STORE))) <= ZAODCHK_TOL .AND. &
+        & MAXVAL(ABS(ZAOD_SUM_SPECIES(KIDIA:KFDIA)-PAOD_DIAG(KIDIA:KFDIA,IW_STORE))) <= ZAODCHK_TOL) THEN
+        WRITE(NULOUT,*) 'HAMM7_DIAGNOSTICS: AOD consistency check at 550nm (IW_STORE=', IW_STORE, &
+             & ') -- consistent within tolerance', ZAODCHK_TOL
+      ELSE
+        WRITE(NULOUT,*) 'HAMM7 DIAGNOSTICS WARNING: AOD consistency check at 550nm (IW_STORE=', IW_STORE, &
+             & ') -- NOT consistent within tolerance', ZAODCHK_TOL, &
+             & ' -- see aerosol-water caveat in the comment above'
+      ENDIF
+      WRITE(NULOUT,*) '  total AOD (diagnostic 550nm, max over block) =', MAXVAL(PAOD_DIAG(KIDIA:KFDIA,IW_STORE))
+      WRITE(NULOUT,*) '  sum per modes   =', MAXVAL(ZAOD_SUM_MODE(KIDIA:KFDIA)), &
+           & ' ; abs(diff) =', MAXVAL(ABS(ZAOD_SUM_MODE(KIDIA:KFDIA)   -PAOD_DIAG(KIDIA:KFDIA,IW_STORE)))
+      WRITE(NULOUT,*) '  sum per tracers =', MAXVAL(ZAOD_SUM_TRACER(KIDIA:KFDIA)), &
+           & ' ; abs(diff) =', MAXVAL(ABS(ZAOD_SUM_TRACER(KIDIA:KFDIA) -PAOD_DIAG(KIDIA:KFDIA,IW_STORE)))
+      WRITE(NULOUT,*) '  sum per species =', MAXVAL(ZAOD_SUM_SPECIES(KIDIA:KFDIA)), &
+           & ' ; abs(diff) =', MAXVAL(ABS(ZAOD_SUM_SPECIES(KIDIA:KFDIA)-PAOD_DIAG(KIDIA:KFDIA,IW_STORE)))
+
       IF (LLAOD_NEG) THEN
-        WRITE(NULOUT,*) 'HAMM7_INTERFACE WARNING: negative AOD found in per-mode/tracer/species 550nm diagnostics (YAEROUT(30)/(31)/(32))'
+        WRITE(NULOUT,*) 'HAMM7 DIAGNOSTICS WARNING: negative AOD found in per-mode/tracer/species 550nm diagnostics (YAEROUT(30)/(31)/(32))'
       ENDIF
 
     ENDIF
@@ -686,15 +718,15 @@ CONTAINS
 END MODULE HAMM7_DIAGNOSTICS
 
 ! =============================================================================
-! Reference documentation
+! Reference documentation (mention 550nm but it is flexible)
 ! =============================================================================
 !
 ! YAEROUT(30) : AOD per M7 mode (nclass) at 550nm only and NAEROOPT=2 (HAM optics) only. 
 !               PGFL(:,JCLASS,YAEROUT(30)%MP), JCLASS=1:nclass. 
-!               (1) Summing over JCLASS should reproduce PGFL(:,IW550,YAEROUT(6)%MP)
+!               (1) Summing over JCLASS should reproduce PGFL(:,IW_STORE,YAEROUT(6)%MP)
 !               (AOD total at 550nm). 
 !               Requires NAEROUT raised to >= 30 in the namelist.
-!               IW550 picks out whichever YAERO_WVL_DIAG_NL entry is 550nm 
+!               IW_STORE picks out whichever YAERO_WVL_DIAG_NL entry is 550nm 
 !
 ! YAEROUT(31) : AOD per tracer (naerocomp, mode x species but linear) at 550nm.
 !               NAEROOPT=2 only. 
@@ -729,14 +761,14 @@ END MODULE HAMM7_DIAGNOSTICS
 !               Summing over the JN whose aerocomp(JN)%iclass is a given mode must reproduce
 !               that mode's value in YAEROUT(30); summing over the JN of one chemical species
 !               (across modes) gives the per-species AOD (YAEROUT(32)).
-!               Uses IW550 computed for YAEROUT(30).
+!               Uses IW_STORE computed for YAEROUT(30).
 !
 ! YAEROUT(32) : AOD per chemical species at 550nm (e.g. all DU_* modes are added into
 !               "dust" value). NAEROOPT=2 only. 
 !               PGFL(:,ISPID,YAEROUT(32)%MP), ISPID=aerocomp(JN)%spid identifies 
 !               the species (same spid for every mode a species appears in, 
 !               e.g. DU_AS/DU_AI/DU_CI/DU_CS all share one spid).
-!               Reuses ZAOD_DIAG_TRACER and IW550 computed before (YAEROUT(31)) 
+!               Reuses ZAOD_DIAG_TRACER and IW_STORE computed before (YAEROUT(31)) 
 !
 !               ISPID comes from mo_ham_species.F90's SUBROUTINE ham_species
 !                 1=DMS 
@@ -777,8 +809,8 @@ END MODULE HAMM7_DIAGNOSTICS
 ! Consistency check for the AOD-by-mode/tracer/species diagnostics above: they are all
 !               re-groupings of the same additive quantity, so summing YAEROUT(30) over its
 !               7 modes, or YAEROUT(31)'s underlying 18 tracers, or YAEROUT(32) over its 5
-!               species, must all reproduce the total AOD at 550nm (ZAOD_DIAG(:,IW550), same
-!               value as YAEROUT(6) at IW550) to within floating-point summation-order error
+!               species, must all reproduce the total AOD at 550nm (ZAOD_DIAG(:,IW_STORE), same
+!               value as YAEROUT(6) at IW_STORE) to within floating-point summation-order error
 !               and AOD, an optical thickness, must never be negative. 
 !               Any of these check failing may means a bug in the volume-fraction 
 !               split implementation maybe in mo_ham_rad.F90 or here, not in M7's own physics

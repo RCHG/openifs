@@ -882,7 +882,7 @@ CONTAINS
        aer_tau_sw_vr, aer_piz_sw_vr, aer_cg_sw_vr, aer_tau_lw_vr, rwet_m7, &
        & ldiag_aeropt, kb_diag, ntype_diaf, &
        & lambda_diag, zaer_tau_diag, zaer_ssa_diag, zaer_asym_diag, &
-       & zaod_diag_mode, zaod_diag_tracer)
+       & zaod_diag_mode, zaod_diag_tracer, zaod_diag_water)
     ! *ham_rad* calculates optical properties for
     !            aerosol distributions from look-up
     !            tables.
@@ -970,6 +970,10 @@ CONTAINS
     ! volume-weighted refractive index mixing done at ham_rad_refrac_volume/_coreshell.
     ! Left absent (not PRESENT) leaves behaviour unchanged.
     real(dp),intent(out),optional :: zaod_diag_tracer(kbdim,kb_diag,naerocomp)
+
+    ! (RChG) optional: column AOD per soluble mode attributable to aerosol water.
+    ! Left absent (not PRESENT) leaves behaviour unchanged.
+    real(dp),intent(out),optional :: zaod_diag_water(kbdim,kb_diag,nclass)
 
     REAL(dp) :: sigma_diag(kbdim,klev,kb_diag,nclass),    &
                 omega_diag(kbdim,klev,kb_diag,nclass), &
@@ -1574,6 +1578,29 @@ CONTAINS
                 END DO
              END IF
           END DO
+
+          ! (RChG) filling the zaod_diag_water. This need to be reviewed, maybe 
+          ! there are better implementations. 
+          IF (PRESENT(zaod_diag_water)) THEN
+             zaod_diag_water(1:kproma,:,:) = 0.0_dp
+             DO jclass=1,nclass
+                IF (sizeclass(jclass)%lsoluble .AND. nrad(jclass) > 0) THEN
+                   jt = aerowater(jclass)%idt
+                   zdensity = aerowater(jclass)%species%density
+                   DO jwv=1,kb_diag
+                      DO jk=1,klev
+                         DO jl=1,kproma
+                            IF (zvsum_tracer(jl,jk,jclass) > THRESHOLD .AND. pxtm1(jl,jk,jt) > THRESHOLD) THEN
+                               zv = pxtm1(jl,jk,jt)/zdensity
+                               zaod_diag_water(jl,jwv,jclass) = zaod_diag_water(jl,jwv,jclass) + &
+                                    zaer_tau_diag_vr(jl,jk,jwv,jclass) * zv/zvsum_tracer(jl,jk,jclass)
+                            END IF
+                         END DO
+                      END DO
+                   END DO
+                END IF
+             END DO
+          END IF
        END IF
 
        !--- Diagnose AOD for requested each mode (nrad) and wavelength (nraddiagwv):

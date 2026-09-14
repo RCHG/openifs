@@ -479,17 +479,14 @@ REAL(KIND=JPRB) :: LAMBDA_DIAG(YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
 REAL(KIND=JPRB) :: ZAOD_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG), ZSSA_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
 REAL(KIND=JPRB) :: ZABS_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG), ZASY_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
 
-! Column (vertically-integrated) AOD per M7 mode (nclass) at the diagnostic wavelength(s),
-! step (a) of the per-tracer AOD work. HAM_RAD integrates over levels internally before
-! returning it (see mo_ham_rad.F90, zaod_diag_mode). Summing over nclass must reproduce ZAOD_DIAG.
+! Column (vertically-integrated) AOD per M7 mode (nclass) at NAERO_WVL_DIAG
 REAL(KIND=JPRB) :: ZAOD_DIAG_MODE(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,nclass)
 
-! Column AOD per tracer (naerocomp - linear list mode x species, see mo_ham's aerocomp) at the
-! diagnostic wavelength(s), the per-tracer counterpart of ZAOD_DIAG_MODE above. Summing over the
-! tracers that belong to one mode (ind_oifs_ham/aerocomp%iclass) must reproduce ZAOD_DIAG_MODE
-! for that mode; summing over the tracers of one chemical species (across all modes) gives the
-! per-species AOD - both done in post-processing, not in this file (see mo_ham_rad.F90).
+! Column AOD per tracer (naerocomp - linear list mode x species) at NAERO_WVL_DIAG 
 REAL(KIND=JPRB) :: ZAOD_DIAG_TRACER(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,naerocomp)
+
+! Column AOD per soluble mode (nclass) attributable to aerosol water
+REAL(KIND=JPRB) :: ZAOD_DIAG_WATER(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,nclass)
 !-----------------------------------------------------------------------
 
 #include "abor1.intfb.h"
@@ -1650,6 +1647,7 @@ IF(MOD(NSTEP,NRADFR) == 0) THEN
   ZAER_ASYM_DIAG(KIDIA:KFDIA,:,:) = 0.0_JPRB
   ZAOD_DIAG_MODE(KIDIA:KFDIA,:,:) = 0._JPRB
   ZAOD_DIAG_TRACER(KIDIA:KFDIA,:,:) = 0._JPRB
+  ZAOD_DIAG_WATER(KIDIA:KFDIA,:,:) = 0._JPRB
 
 SELECT CASE (NAEROOPT)
 
@@ -1708,7 +1706,7 @@ CASE (1)
         & ZAER_TAU(:,:,:,1), ZAER_SSA, ZAER_ASYM, ZAER_TAU_LW, ZM6RP, &
         & LDIAG_AEROPT,NAERO_WVL_DIAG,YGFL%NAERO_WVL_DIAG_TYPES, &
         & LAMBDA_DIAG, ZAER_TAU_DIAG, ZAER_SSA_DIAG, ZAER_ASYM_DIAG, &
-        & ZAOD_DIAG_MODE, ZAOD_DIAG_TRACER) ! RCHG -> I added to optional arrays here. 
+        & ZAOD_DIAG_MODE, ZAOD_DIAG_TRACER, ZAOD_DIAG_WATER) ! RCHG -> I added to optional arrays here.
    !CALL ham_rad_cache_cleanup
 
    DO JK = 1, KLEV
@@ -1931,7 +1929,7 @@ IF(.NOT.LIFSMIN  .AND. .NOT.LIFSTRAJ) THEN
   !                 plus their runtime consistency check 
   CALL WRITE_OPTICAL_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, YDMODEL, &
        & NAEROOPT, NSTEP, NRADFR,                                  &
-       & ZAOD_DIAG_MODE, ZAOD_DIAG_TRACER, ZAOD_DIAG,               &
+       & ZAOD_DIAG_MODE, ZAOD_DIAG_TRACER, ZAOD_DIAG_WATER, ZAOD_DIAG, &
        & PGFL)
 
   !** YAEROUT(11)/(12)/(14)/(15) : column mass/number concentration, tendency, the
