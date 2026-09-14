@@ -25,8 +25,11 @@
 !!   -# M.G. Schultz (FZ Juelich) - cleanup (XXXX)
 !!   -# P. Stier (Uni Oxford) - adaptation to RRTM-SW (2010)
 !!   -# T. Bergman (FMI) - nmod->nclass to facilitate new aerosol models (2013-02-05)
-!!   -#  H. Kokkola (FMI) - modified to include SALSA (2013-06)
-!!
+!!   -# H. Kokkola (FMI) - modified to include SALSA (2013-06)
+!!   -# R. Checa-Garcia (KNMI) - added AOD diagnostics per-mode, per-tracer, and
+!!                           per-species (approx. split by volume fraction within
+!!                           each mode) (2026)
+
 !! \limitations
 !! None
 !!
@@ -49,6 +52,10 @@
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 MODULE mo_ham_rad
+  ! Adds zaod_diag_tracer, the per-tracer (naerocomp-linear, i.e. mode x species) column AOD
+  ! at the diagnostic wavelength(s), on top of the zaod_diag_mode (per-M7-mode) diagnostic.
+  ! Both arguments are OPTIONAL and additive - existing callers of ham_rad are unaffected
+  ! either way.
 
   USE mo_ham_rad_data, ONLY: Nwv_sw, Nwv_sw_opt, Nwv_lw,        &
                               Nwv_tot, Nwv_sw_tot,              &
@@ -874,7 +881,8 @@ CONTAINS
        pxtm1,         ppd_hl,                                    &
        aer_tau_sw_vr, aer_piz_sw_vr, aer_cg_sw_vr, aer_tau_lw_vr, rwet_m7, &
        & ldiag_aeropt, kb_diag, ntype_diaf, &
-       & lambda_diag, zaer_tau_diag, zaer_ssa_diag, zaer_asym_diag)
+       & lambda_diag, zaer_tau_diag, zaer_ssa_diag, zaer_asym_diag, &
+       & zaod_diag_mode, zaod_diag_tracer)
     ! *ham_rad* calculates optical properties for
     !            aerosol distributions from look-up
     !            tables.
@@ -899,13 +907,13 @@ CONTAINS
     ! ----------
     ! *ham_rad* is called by *radiation*
 
-    USE mo_ham,           ONLY: naerorad, nrad, nham_subm, HAM_SALSA, HAM_M7, &
+    USE mo_ham,           ONLY: naerorad, nrad, nradmix, nham_subm, HAM_SALSA, HAM_M7, &
                                 sigma_fine, sigma_coarse !SF #320
     USE mo_ham_m7ctl,     ONLY: modesigma=>sigma
     USE mo_math_constants, ONLY: pi
     USE mo_physical_constants, ONLY: grav
     USE mo_kind,          ONLY: dp
-    USE mo_exception,     ONLY: finish
+    USE mo_exception,     ONLY: finish, message, message_text, em_warn
     USE mo_tracdef,       ONLY: ntrac
 #ifdef HAMMOZ
     USE mo_ham_streams,   ONLY: rwet
@@ -949,6 +957,20 @@ CONTAINS
     real(dp),intent(inout) :: zaer_ssa_diag(kbdim,klev,kb_diag)
     real(dp),intent(inout) :: zaer_asym_diag(kbdim,klev,kb_diag)
 
+    ! (RChG) optional: column (vertically-integrated) AOD per mode at the diagnostic wavelength(s),
+    ! i.e. zaer_tau_diag_vr below summed over jk before it is summed over jclass. Not part of
+    ! the original ECHAM-HAMMOZ. Included here for OpenIFS-M7 per-mode/per-tracer AOD
+    ! diagnostics (hamm7_interface.F90). Left absent (not PRESENT) leaves behaviour unchanged.
+    real(dp),intent(out),optional :: zaod_diag_mode(kbdim,kb_diag,nclass)
+
+    ! (RChG) optional: column AOD per tracer (naerocomp, which is linear list of mode x species)
+    ! Separates zaod_diag_mode's per-mode AOD between the species that define each mode, 
+    ! This is done weighting by each species' (and, for soluble modes, aerosol
+    ! water's) volume fraction within the mode at that level. Motivation: same idea that 
+    ! volume-weighted refractive index mixing done at ham_rad_refrac_volume/_coreshell.
+    ! Left absent (not PRESENT) leaves behaviour unchanged.
+    real(dp),intent(out),optional :: zaod_diag_tracer(kbdim,kb_diag,naerocomp)
+
     REAL(dp) :: sigma_diag(kbdim,klev,kb_diag,nclass),    &
                 omega_diag(kbdim,klev,kb_diag,nclass), &
                 asym_diag (kbdim,klev,kb_diag,nclass), &
@@ -961,6 +983,11 @@ CONTAINS
     REAL(dp), INTENT(in)    ::    rwet_m7(kbdim,klev,nclass) 
 #endif  
     INTEGER  :: jclass, jl, jk, jwv, jwv_diag, itable, itrac, ikl
+
+    ! (RChG) added for for zaod_diag_tracer: jt/jn/zdensity/zv (like ham_rad_refrac_volume naming)
+    INTEGER  :: jt, jn
+    REAL(dp) :: zdensity, zv
+    REAL(dp) :: zvsum_tracer(kbdim,klev,nclass)
 
     REAL(dp) :: zeps
 
@@ -1453,6 +1480,101 @@ CONTAINS
              END DO
           END IF
        END DO
+
+       ! ---- Calculation of additional (optional) outputs for OpenIFS-M7 --------
+       !      (RChG) implemented using same ideas of present code. NEEDS A REVIEW! 
+       !
+       IF (PRESENT(zaod_diag_mode)) THEN
+          zaod_diag_mode(1:kproma,:,:) = 0.0_dp
+          DO jclass=1, nclass
+             DO jwv=1, kb_diag
+                DO jk=1, klev
+                   zaod_diag_mode(1:kproma,jwv,jclass) = zaod_diag_mode(1:kproma,jwv,jclass) + &
+                        zaer_tau_diag_vr(1:kproma,jk,jwv,jclass)
+                END DO
+             END DO
+          END DO
+       END IF
+
+       IF (PRESENT(zaod_diag_tracer)) THEN
+          zaod_diag_tracer(1:kproma,:,:) = 0.0_dp
+
+          ! (RChG) Consistency guard: the code needs to split in tracer/species, for each
+          ! mode calculated extintion (Mie probably) based on nr/ni (full mode), 
+          ! radius, wavel, and number of particles. The split aims to be 
+          ! consistent on the method used to estimate the "common" nr/ni. So we 
+          ! need to check that specific consistency. 
+          ! The split aims to be "fairly" consistent with case nradmix(jclass)==1 
+          ! but probably not with Maxwell-Garnnet (nradmix=2) and Bruggeman (=3).
+          ! ... methods that can introduce a more non-linear mixing...
+          !
+          ! Important: the checking of sum-rule can be ok even with no consistency
+          !           so we emit a warning rather than a error. But this needs to 
+          !           be discussed. 
+          DO jclass=1,nclass
+             IF (nrad(jclass) > 0 .AND. nradmix(jclass) /= 1) THEN
+                WRITE(message_text,'(a,i0,a,i0,a)') 'mode ', jclass, ' uses nradmix=', nradmix(jclass), &
+                     ' (not volume-weighted, =1) -- its zaod_diag_tracer/zaod_diag_species split by ' // &
+                     'raw volume fraction is a weaker approximation than for a volume-weighted mode'
+                CALL message('ham_rad', message_text, level=em_warn)
+             END IF
+          END DO
+
+          ! volume of each tracer's species, summed per mode (zvsum_tracer)
+          ! aerosol water added below for soluble modes. 
+          zvsum_tracer(1:kproma,:,:) = 0.0_dp
+          DO jn=1,naerocomp
+             IF (nrad(aerocomp(jn)%iclass) > 0) THEN
+                jt = aerocomp(jn)%idt
+                zdensity = aerocomp(jn)%species%density
+                DO jk=1,klev
+                   DO jl=1,kproma
+                      IF (pxtm1(jl,jk,jt) > THRESHOLD) THEN
+                         zvsum_tracer(jl,jk,aerocomp(jn)%iclass) = &
+                              zvsum_tracer(jl,jk,aerocomp(jn)%iclass) + pxtm1(jl,jk,jt)/zdensity
+                      END IF
+                   END DO
+                END DO
+             END IF
+          END DO
+
+          DO jclass=1,nclass
+             IF (sizeclass(jclass)%lsoluble .AND. nrad(jclass) > 0) THEN
+                jt = aerowater(jclass)%idt
+                zdensity = aerowater(jclass)%species%density
+                DO jk=1,klev
+                   DO jl=1,kproma
+                      IF (pxtm1(jl,jk,jt) > THRESHOLD) THEN
+                         zvsum_tracer(jl,jk,jclass) = zvsum_tracer(jl,jk,jclass) + pxtm1(jl,jk,jt)/zdensity
+                      END IF
+                   END DO
+                END DO
+             END IF
+          END DO
+
+          ! (RChG) as explained above we do a split each mode's per-level AOD 
+          ! (zaer_tau_diag_vr) between its tracers by volume fraction at that level, 
+          ! then integrate over levels. Note that the per-level weighting the
+          ! is kept for tracers instead of summing straight to pure-species totals.
+          DO jn=1,naerocomp
+             IF (nrad(aerocomp(jn)%iclass) > 0) THEN
+                jt     = aerocomp(jn)%idt
+                jclass = aerocomp(jn)%iclass
+                zdensity = aerocomp(jn)%species%density
+                DO jwv=1,kb_diag
+                   DO jk=1,klev
+                      DO jl=1,kproma
+                         IF (zvsum_tracer(jl,jk,jclass) > THRESHOLD) THEN
+                            zv = pxtm1(jl,jk,jt)/zdensity
+                            zaod_diag_tracer(jl,jwv,jn) = zaod_diag_tracer(jl,jwv,jn) + &
+                                 zaer_tau_diag_vr(jl,jk,jwv,jclass) * zv/zvsum_tracer(jl,jk,jclass)
+                         END IF
+                      END DO
+                   END DO
+                END DO
+             END IF
+          END DO
+       END IF
 
        !--- Diagnose AOD for requested each mode (nrad) and wavelength (nraddiagwv):
 !#ifdef HAMMOZ

@@ -57,14 +57,15 @@ SUBROUTINE HAMM7_INTERFACE( &
 ! │     Sep.  2020 - T. Bergman     : TM5M7 work                               │
 ! │     Apr.  2024 - Lianghai Wu    : revision for CY48r1                      │
 ! │     May.  2024 - R. Checa-Garcia: revision for CY48r1 and refactoring      │
-! │                                                                            │
+! │     Sep.  2026 - R. Checa-Garcia: moved diagnostics to external and added  │
+! │                                   a AOD per species/modes/tracers.         │
 ! ╰────────────────────────────────────────────────────────────────────────────╯
 
-! RCHG: (TODO)
-!      This subroutine assumes YAEROUT() has a number of elements, we may have 
-!      to introduce something that test that the number is consistent with what 
-!      is needed. Also the namelist with YAEROUT specification may need to be  
-!      consistent with how we fill things here (not sure about it). 
+! RCHG: (DIAGNOSTICS <-> YAEROUT) moved to a external module with a set of 
+!      of subroutines to write families of outputs. Trying to organize them 
+!      and reduce a bit the size of this subroutine. Can be a temporal kind 
+!      of refactor.
+!
 !
 ! RCHG: (TODO) 
 !      For this subroutine the description of the steps is not very uniform 
@@ -165,11 +166,11 @@ USE TM5M7_DATA,   ONLY: MODAL_DATA, MODE_TRACERS, MODE_START,      &
 USE YOMCHEM,      ONLY: IEXTR_WD, IEXTR_CH, IEXTR_NG, IEXTR_DD, IEXTR_CHTR
 
 USE YOE_AERODIAG, ONLY: JPAERO_WVL_AOD, JPAERO_WVL_AODABS, JPAERO_WVL_AODFM,   &
-                      & JPAERO_WVL_SSA, JPAERO_WVL_ASSIMETRY
+                      & JPAERO_WVL_SSA, JPAERO_WVL_ASSIMETRY, JPAERODIAG_OD
 USE YOMLUN,       ONLY: NULOUT
 
 ! HAM-M7
-USE MO_HAM,                  ONLY: nclass, naerocomp, sizeclass, nccndiag, subm_ngasspec
+USE MO_HAM,                  ONLY: nclass, naerocomp, sizeclass, nccndiag, subm_ngasspec, aerocomp
 USE OIFS_TO_HAM,             ONLY: ind_oifs_ham
 USE MO_HAM_SUBM,             ONLY: HAM_SUBM_INTERFACE                   ! replaced HAM-M7 call with submodel interface
 USE MO_ACTIV,                ONLY: activ_updraft,nw, idt_cdnc, idt_icnc ! HAM-M7 activation updraft calculation, effective radii
@@ -183,6 +184,10 @@ USE MO_HAM_WETDEP,           ONLY: ham_conv_lfraq_so2
 USE MO_HAMMOZ_SEDIMENTATION, ONLY: sedi_interface   ! sedimentation interface call
 USE MO_HAMMOZ_DRYDEP,        ONLY: drydep_interface ! dry deposition interface call
 USE MO_HAM_RAD,              ONLY: ham_rad,ham_rad_cache_cleanup,ham_rad_cache
+USE HAMM7_DIAGNOSTICS,       ONLY: WRITE_OPTICAL_DIAGNOSTICS, WRITE_TOTALAOD_DIAGNOSTICS, &
+                                  & WRITE_COLUMN_DIAGNOSTICS, WRITE_SURFACE_DIAGNOSTICS,   &
+                                  & WRITE_DEPOSITION_DIAGNOSTICS, WRITE_NETFLUX_DIAGNOSTICS, &
+                                  & WRITE_EMISSION_DIAGNOSTICS, WRITE_MISC_DIAGNOSTICS
 
 USE YOE_AER_ACTIV,           ONLY: AER_ACTIV ! M&N activation scheme
 
@@ -268,7 +273,21 @@ REAL(KIND=JPRB),INTENT(OUT)     :: PAEPM10(KLON)
 
 INTEGER(KIND=JPIM) :: JAER, JK, JL, JWAVL, JT, JB, JN
 INTEGER(KIND=JPIM) :: JEXT, ITRC, IKLEVTROP(KLON), IW
-INTEGER(KIND=JPIM) :: JO, JH, JY                         ! inside loop index for OIFS contex, HAM context and YAEROUT 
+INTEGER(KIND=JPIM) :: IW550 ! index into NAERO_WVL_DIAG matching the 550nm diagnostic wavelength
+INTEGER(KIND=JPIM) :: ISPID ! aerocomp(:)%spid of the current tracer, used to sum AOD by species
+INTEGER(KIND=JPIM), PARAMETER :: NSPECMAX=20 ! safe upper bound for aerocomp(:)%spid (speclist
+                                              ! has 14 entries as of mo_ham_species.F90: DMS, SO2,
+                                              ! OH, H2O2, O3, NO2, NO3, H2SO4, SO4, BC, OC, SS, DU,
+                                              ! WAT - only the last 5 (aerosol-phase) ever appear
+                                              ! as an aerocomp(:)%spid, so 20 leaves headroom)
+REAL(KIND=JPRB) :: ZAOD_SUM_MODE(KLON), ZAOD_SUM_TRACER(KLON), ZAOD_SUM_SPECIES(KLON)
+                    ! per-point re-sum of YAEROUT(30)/(31)/(32)'s source data, for the
+                    ! consistency check below (must all equal ZAOD_DIAG(:,IW550), the total)
+REAL(KIND=JPRB), PARAMETER :: ZAODCHK_TOL=1.0E-6_JPRB ! tolerance for that consistency check -
+                    ! generous vs. the ~1e-13 floating-point summation-order error expected for
+                    ! reordering the sum of ~20 O(0.01-1) terms; a real bug should exceed this
+LOGICAL :: LLAOD_NEG ! true if any per-mode/tracer/species 550nm AOD diagnostic is negative
+INTEGER(KIND=JPIM) :: JO, JH, JY                         ! inside loop index for OIFS contex, HAM context and YAEROUT
 INTEGER(KIND=JPIM) :: JCLASS, JTILE, JMASS, JGAS, JCLOUD ! local loop indice for activation and dry deposition and tracer indexing
 INTEGER(KIND=JPIM) :: ISSO2, ISSO4, ISSO4_ACS
 INTEGER(KIND=JPIM) :: IMODE 
@@ -459,6 +478,18 @@ REAL(KIND=JPRB) :: LAMBDA_DIAG(YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
 
 REAL(KIND=JPRB) :: ZAOD_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG), ZSSA_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
 REAL(KIND=JPRB) :: ZABS_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG), ZASY_DIAG(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
+
+! Column (vertically-integrated) AOD per M7 mode (nclass) at the diagnostic wavelength(s),
+! step (a) of the per-tracer AOD work. HAM_RAD integrates over levels internally before
+! returning it (see mo_ham_rad.F90, zaod_diag_mode). Summing over nclass must reproduce ZAOD_DIAG.
+REAL(KIND=JPRB) :: ZAOD_DIAG_MODE(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,nclass)
+
+! Column AOD per tracer (naerocomp - linear list mode x species, see mo_ham's aerocomp) at the
+! diagnostic wavelength(s), the per-tracer counterpart of ZAOD_DIAG_MODE above. Summing over the
+! tracers that belong to one mode (ind_oifs_ham/aerocomp%iclass) must reproduce ZAOD_DIAG_MODE
+! for that mode; summing over the tracers of one chemical species (across all modes) gives the
+! per-species AOD - both done in post-processing, not in this file (see mo_ham_rad.F90).
+REAL(KIND=JPRB) :: ZAOD_DIAG_TRACER(KLON,YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG,naerocomp)
 !-----------------------------------------------------------------------
 
 #include "abor1.intfb.h"
@@ -1617,8 +1648,10 @@ IF(MOD(NSTEP,NRADFR) == 0) THEN
   ZAER_TAU_DIAG(KIDIA:KFDIA,:,:)  = 0.0_JPRB
   ZAER_SSA_DIAG(KIDIA:KFDIA,:,:)  = 0.0_JPRB
   ZAER_ASYM_DIAG(KIDIA:KFDIA,:,:) = 0.0_JPRB
+  ZAOD_DIAG_MODE(KIDIA:KFDIA,:,:) = 0._JPRB
+  ZAOD_DIAG_TRACER(KIDIA:KFDIA,:,:) = 0._JPRB
 
-SELECT CASE (NAEROOPT) 
+SELECT CASE (NAEROOPT)
 
 CASE (0)
 
@@ -1674,7 +1707,8 @@ CASE (1)
    CALL HAM_RAD(KFDIA, KLON, KLEV, ZKROW, LWBANDS, NASWBAND, ZXTM0, PRS1D, &
         & ZAER_TAU(:,:,:,1), ZAER_SSA, ZAER_ASYM, ZAER_TAU_LW, ZM6RP, &
         & LDIAG_AEROPT,NAERO_WVL_DIAG,YGFL%NAERO_WVL_DIAG_TYPES, &
-        & LAMBDA_DIAG, ZAER_TAU_DIAG, ZAER_SSA_DIAG, ZAER_ASYM_DIAG)
+        & LAMBDA_DIAG, ZAER_TAU_DIAG, ZAER_SSA_DIAG, ZAER_ASYM_DIAG, &
+        & ZAOD_DIAG_MODE, ZAOD_DIAG_TRACER) ! RCHG -> I added to optional arrays here. 
    !CALL ham_rad_cache_cleanup
 
    DO JK = 1, KLEV
@@ -1701,6 +1735,10 @@ CASE (1)
        END DO
      END DO
    END DO
+
+   ! ZAOD_DIAG_MODE (AOD per M7 mode at diagnostic wavelengths, step (a) of the per-tracer AOD
+   ! work) already arrives vertically-integrated from HAM_RAD - no further summation needed here.
+   ! Sum over JCLASS must reproduce ZAOD_DIAG above.
 
    DO JL = KIDIA,KFDIA
      DO IW=1,NAERO_WVL_DIAG
@@ -1831,234 +1869,105 @@ CALL HAMM7_DIAG_PM &
  &( YDMODEL, KIDIA  , KFDIA  , KLON   , KLEV , NAERO ,&
  &  PAEROP, &
  &  PAEPM1, PAEPM25, PAEPM10, &
- &  ZRHO, ZM6DRY, ZM6RP, ZRHOP) 
+ &  ZRHO, ZM6DRY, ZM6RP, ZRHOP)
+
+!------------------------------------------------------------------------------
 !*         7.     STORE IN AEROUTs
-!                 ------------------------------
+!------------------------------------------------------------------------------
 
 ! LIFSMIN (T if running minimisation) and LIFSTRAJ (T if running high
 ! resolution trajectory integration) are both assimilation flags
 IF(.NOT.LIFSMIN  .AND. .NOT.LIFSTRAJ) THEN
 
-  !** YAEROUT(1) : RADIATIVE PROPERTIES
-  
-  ! AOD/SSA/ASY of one internal (short) wavelengths - 533 nm
-  PGFL(KIDIA:KFDIA,1,YAEROUT(1)%MP)=PAOD(KIDIA:KFDIA,10)
-  PGFL(KIDIA:KFDIA,2,YAEROUT(1)%MP)=PSSA(KIDIA:KFDIA,10)
-  PGFL(KIDIA:KFDIA,3,YAEROUT(1)%MP)=PASY(KIDIA:KFDIA,10)
+! -----------------------------------------------------------------------------
+! YAEROUT index map (section 7, "STORE IN AEROUTs") -- kept here for quick
+! reference. See hamm7_diagnostics.F90 for the subroutines these were
+! extracted into.
+!
+!   YAEROUT(1)     -> WRITE_TOTALAOD_DIAGNOSTICS   (AOD/SSA/ASY, 33 fixed internal wavelengths)
+!   YAEROUT(2)     -> WRITE_DEPOSITION_DIAGNOSTICS (dry deposition)
+!   YAEROUT(3)     -> WRITE_DEPOSITION_DIAGNOSTICS (column-integrated wet deposition)
+!   YAEROUT(4)     -> WRITE_DEPOSITION_DIAGNOSTICS (sedimentation)
+!   YAEROUT(5)     -> WRITE_NETFLUX_DIAGNOSTICS    (net emission-surfaceflux + BL height/index)
+!   YAEROUT(6:10)  -> WRITE_TOTALAOD_DIAGNOSTICS   (AOD/AODabs/AODfm/SSA/ASYM, diagnostic wavelengths)
+!   YAEROUT(11)    -> WRITE_COLUMN_DIAGNOSTICS     (column mass+number, current)
+!   YAEROUT(12)    -> WRITE_COLUMN_DIAGNOSTICS     (mass+number tendency)
+!   YAEROUT(13)    -> WRITE_SURFACE_DIAGNOSTICS    (surface flux of tracers)
+!   YAEROUT(14)    -> WRITE_COLUMN_DIAGNOSTICS     (column PREVIOUS, before M7)
+!   YAEROUT(15)    -> WRITE_COLUMN_DIAGNOSTICS     (column of updated tendencies)
+!   YAEROUT(16)    -> WRITE_SURFACE_DIAGNOSTICS    (mass+number mixing ratio at surface)
+!   YAEROUT(17-18) -> WRITE_DEPOSITION_DIAGNOSTICS (wet deposition, in-cloud / below-cloud)
+!   YAEROUT(19-20) -> WRITE_MISC_DIAGNOSTICS       (hardcoded SS-CS tendency before/after surface)
+!   YAEROUT(21)    -> WRITE_MISC_DIAGNOSTICS       (height of each level top)
+!   YAEROUT(22-26) -> WRITE_MISC_DIAGNOSTICS       (nucleation diagnostics)
+!   YAEROUT(27)    -> WRITE_SURFACE_DIAGNOSTICS    (gas mixing ratios at surface)
+!   YAEROUT(28)    -> WRITE_EMISSION_DIAGNOSTICS   (emissions)
+!   YAEROUT(29)    -> WRITE_EMISSION_DIAGNOSTICS   (commented "29" but actually writes slot 39 -- see note there)
+!   YAEROUT(30)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per M7 mode @550nm)
+!   YAEROUT(31)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per tracer @550nm)
+!   YAEROUT(32)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per chemical species @550nm)
+!   YAEROUT(33-38) -> empty ("--" placeholder comments only)
+!   YAEROUT(39)    -> WRITE_EMISSION_DIAGNOSTICS   (actual target of YAEROUT(29)'s write, see above)
+!   YAEROUT(40-45) -> commented-out (SimChem: ZFSO2/ZFSO4/ZFSO4_AQ/ZTSO4/ZTSO4_AQ/ZTSO2)
+!   YAEROUT(46)    -> comment-only section header ("DUST FIELDS DIAGNOSTICS"), no code
+!   YAEROUT(47-50) -> commented-out (dust DU_AI/DU_CI mass and number)
+!   (28+JGAS)/(29+JGAS)/(30+IMODE) -> commented-out ("Commented because of overlap" in the source)
+! -----------------------------------------------------------------------------
 
-  ! AOD of 14 internal (short) wavelengths
-  PGFL(KIDIA:KFDIA,4:17,YAEROUT(1)%MP)=PAOD(KIDIA:KFDIA,1:14)
+  !** YAEROUT(1)/(6:10) : total AOD/SSA/ASY (fixed internal wavelengths) and
+  !                 total AOD/AODabs/AODfm/SSA/ASYM (diagnostic wavelengths)
+  CALL WRITE_TOTALAOD_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, YDMODEL, &
+       & NSTEP, NRADFR,                                             &
+       & PAOD, PSSA, PASY, PAOD_LW, PAERO_WVL_DIAG,                  &
+       & PGFL)
 
-  ! AOD of 16 internal (long) wavelengths
-  PGFL(KIDIA:KFDIA,18:33,YAEROUT(1)%MP)= PAOD_LW(KIDIA:KFDIA,1:16)
+  !** YAEROUT(5) : net aerosol flux (emissions  surface flux) plus
+  !                boundary-layer height/index
+  CALL WRITE_NETFLUX_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, KTRAC, YDMODEL, &
+       & KAERO, PAERSRC, PCFLX, ZDPG, ZBLHIDX, PBLH,                      &
+       & PGFL)
 
-  !** YAEROUT(2) : DRY DEPOSITION
+  !** YAEROUT(30)/(31)/(32) : AOD per M7 mode / tracer / chemical species at 550nm,
+  !                 plus their runtime consistency check 
+  CALL WRITE_OPTICAL_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, YDMODEL, &
+       & NAEROOPT, NSTEP, NRADFR,                                  &
+       & ZAOD_DIAG_MODE, ZAOD_DIAG_TRACER, ZAOD_DIAG,               &
+       & PGFL)
 
-  DO JN=1,NAEROCOMP
-    PGFL(KIDIA:KFDIA,ind_oifs_ham%ind_mass_OIFS(JN),YAEROUT(2)%MP)=ZDDEPFLUX(KIDIA:KFDIA,ind_oifs_ham%IND_mass_HAM(JN))
-  END DO
-  DO JN=1,NCLASS
-    PGFL(KIDIA:KFDIA,ind_oifs_ham%ind_class_OIFS(JN),YAEROUT(2)%MP)=ZDDEPFLUX(KIDIA:KFDIA,ind_oifs_ham%IND_class_HAM(JN))
-  END DO
-  
-  !** YAEROUT(3) : COLUMN INTEGRATED WET-DEPOSITION
+  !** YAEROUT(11)/(12)/(14)/(15) : column mass/number concentration, tendency, the
+  !                 PREVIOUS-concentration column and the updated-tendencies column.
+  CALL WRITE_COLUMN_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, KTRAC, YDMODEL, &
+       & KAERO, ZXTM1, ZXTTE, ZDPG, ZCEN, PTENC,                         &
+       & PGFL)
 
-  DO JN=1,NACTAERO
-    PGFL(KIDIA:KFDIA,KAERO(JN),YAEROUT(3)%MP)  = WDEPOUT_2D(KIDIA:KFDIA,KAERO(JN))
-  END DO
-  
-  !** YAEROUT(4) : SEDIMENTATION
+  !** YAEROUT(13)/(16)/(27) : surface flux of tracers, M7 mass/number mixing ratio at
+  !                 surface, M7 gas mixing ratios at surface
+  CALL WRITE_SURFACE_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, KTRAC, YDMODEL, &
+       & KAERO, PCFLX, ZDPG, ZXTM1, ZXTTE,                                &
+       & PGFL)
 
-  DO JN=1,NAEROCOMP
-    PGFL(KIDIA:KFDIA,ind_oifs_ham%ind_mass_OIFS(JN),YAEROUT(4)%MP)  = ZSEDIFLUXSURF(KIDIA:KFDIA,ind_oifs_ham%IND_mass_HAM(JN))
-  END DO
-  DO JN=1,NCLASS
-    PGFL(KIDIA:KFDIA,ind_oifs_ham%ind_class_OIFS(JN),YAEROUT(4)%MP) = ZSEDIFLUXSURF(KIDIA:KFDIA,ind_oifs_ham%IND_class_HAM(JN))
-  END DO
+  !** YAEROUT(17-18) : in-cloud and below-cloud wet deposition
+  CALL WRITE_DEPOSITION_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, KTRAC, YDMODEL,       &
+       & KAERO, ZDDEPFLUX, WDEPOUT_2D, ZSEDIFLUXSURF, WDEPOUT_IC_2D, WDEPOUT_BC_2D, &
+       & PGFL)
 
-  !** YAEROUT(5) : NET AEROSOLS FLUXES (EMISSIONS - ???) ; level index of top of boundary layer ; boundary layer height
-  
-  DO JN=1,NACTAERO
-    PGFL(KIDIA:KFDIA,KAERO(JN),YAEROUT(5)%MP)  = PAERSRC(KIDIA:KFDIA,KAERO(JN)) - PCFLX(KIDIA:KFDIA,KAERO(JN))* ZDPG(KIDIA:KFDIA,KLEV)
-  END DO
-  PGFL(KIDIA:KFDIA,NACTAERO+2,YAEROUT(5)%MP)  = ZBLHIDX(KIDIA:KFDIA)
-  PGFL(KIDIA:KFDIA,NACTAERO+3,YAEROUT(5)%MP)  = PBLH(KIDIA:KFDIA)
+  !** YAEROUT(19-20)/(21)/(22-26) : hardcoded SS-CS tendency before/after surface
+  !                 update, height of each level top, nucleation diagnostics
+  CALL WRITE_MISC_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, YDMODEL, &
+       & ZXTTE, ZTENCIH, PGEOH, ZRG, ZOUT_dnuc,                  &
+       & PGFL)
 
-  !** YAEROUT(6:10) : Store all requested AOP at selected (diagnostic) wavelengths
-  
-  IF(MOD(NSTEP,NRADFR) == 0) THEN
-    IF (YGFL%NAERO_WVL_DIAG_TYPES >= JPAERO_WVL_AOD) THEN
-      PGFL(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, YAEROUT(6)%MP) = PAERO_WVL_DIAG(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, JPAERO_WVL_AOD)
-    ENDIF
-    IF (YGFL%NAERO_WVL_DIAG_TYPES >= JPAERO_WVL_AODABS) THEN
-      PGFL(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, YAEROUT(7)%MP) = PAERO_WVL_DIAG(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, JPAERO_WVL_AODABS)
-    ENDIF
-    IF (YGFL%NAERO_WVL_DIAG_TYPES >= JPAERO_WVL_AODFM) THEN
-      PGFL(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, YAEROUT(8)%MP) = PAERO_WVL_DIAG(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, JPAERO_WVL_AODFM)
-    ENDIF
-    IF (YGFL%NAERO_WVL_DIAG_TYPES >= JPAERO_WVL_SSA) THEN
-      PGFL(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, YAEROUT(9)%MP) = PAERO_WVL_DIAG(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, JPAERO_WVL_SSA)
-    ENDIF
-    IF (YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG_TYPES >= JPAERO_WVL_ASSIMETRY) THEN
-      PGFL(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, YAEROUT(10)%MP) = PAERO_WVL_DIAG(KIDIA:KFDIA, 1:NAERO_WVL_DIAG, JPAERO_WVL_ASSIMETRY)
-    ENDIF
-  ENDIF
-  
-  !** YAEROUT(11) : Total column mass and number concentration
-  
-  DO JN=1,NAEROCOMP
-    JO=ind_oifs_ham%ind_mass_OIFS(JN)  ! JO -> index context OIFS 
-    JH=ind_oifs_ham%IND_mass_HAM(JN)   ! JH -> index context HAM 
-    JY=YAEROUT(11)%MP
-    ZTMP(KIDIA:KFDIA)=0.0_JPRB
-    DO JK=1,KLEV
-      ZTMP(KIDIA:KFDIA)= ZTMP(KIDIA:KFDIA) + (ZXTM1(KIDIA:KFDIA,JK,JH)+(ZXTTE(KIDIA:KFDIA,JK,JH)*TIME_STEP_LEN)) * ZDPG(KIDIA:KFDIA,JK)
-    END DO
-    PGFL(KIDIA:KFDIA,JO,JY) = ZTMP(KIDIA:KFDIA)
-  END DO
+  !** YAEROUT(28)/(29) : emissions, surface emissions modified by dry deposition
+  !                 (this one writes to YAEROUT(39)%MP, not YAEROUT(29)%MP !!!!)
+  !         RCHG -> I kept write to 39, discuss if this is an issue of comments
+  CALL WRITE_EMISSION_DIAGNOSTICS(KIDIA, KFDIA, KLON, KLEV, YDMODEL, &
+       & KAERO, PAERSRC, ZXTEMS,                                    &
+       & PGFL)
 
-  DO JN=1,NCLASS
-    JO=ind_oifs_ham%ind_class_OIFS(JN)  ! JO -> index context OIFS 
-    JH=ind_oifs_ham%IND_class_HAM(JN)   ! JH -> index context HAM 
-    JY=YAEROUT(11)%MP
-    ZTMP(KIDIA:KFDIA)=0.0_JPRB
-    DO JK=1,KLEV
-      ZTMP(KIDIA:KFDIA) = ZTMP(KIDIA:KFDIA) + (ZXTM1(KIDIA:KFDIA,JK,JH)+(ZXTTE(KIDIA:KFDIA,JK,JH)*TIME_STEP_LEN)) * ZDPG(KIDIA:KFDIA,JK)
-    END DO
-    PGFL(KIDIA:KFDIA,JO,JY) = ZTMP(KIDIA:KFDIA)
-  END DO
 
-  !** YAEROUT(12) : mass and number tendency
-  ! kg/kg -> kg/m2 N/kg-> N/m2
-  DO JN=1,NAEROCOMP    !ntrac!NACTAERO   
-    JO=ind_oifs_ham%ind_mass_OIFS(JN)  ! JO -> index context OIFS 
-    JH=ind_oifs_ham%IND_mass_HAM(JN)   ! JH -> index context HAM 
-    JY=YAEROUT(12)%MP
-    ZTMP(KIDIA:KFDIA)=0.0_JPRB
-    DO JK=1,KLEV
-      ZTMP(KIDIA:KFDIA) = ZTMP(KIDIA:KFDIA) + ZXTTE(KIDIA:KFDIA,JK,JH)
-    END DO
-    PGFL(KIDIA:KFDIA,JO,JY) = ZTMP(KIDIA:KFDIA)
-  END DO
-
-  DO JN=1,NCLASS
-    JO=ind_oifs_ham%ind_class_OIFS(JN)  ! JO -> index context OIFS 
-    JH=ind_oifs_ham%IND_class_HAM(JN)   ! JH -> index context HAM 
-    JY=YAEROUT(12)%MP
-    ZTMP(KIDIA:KFDIA)=0.0_JPRB
-    DO JK=1,KLEV
-      ZTMP(KIDIA:KFDIA) = ZTMP(KIDIA:KFDIA) + ZXTTE(KIDIA:KFDIA,JK,JH)
-    END DO
-    PGFL(KIDIA:KFDIA,JO,JY) = ZTMP(KIDIA:KFDIA)
-  END DO
-
-  !** YAEROUT(13) : Surface fluxes of tracers (not emissions)
-  
-  DO JN=1,NACTAERO
-    !ZTMP(KIDIA:KFDIA)=0.0_JPRB
-    !DO JK=1,KLEV
-    !  ZTMP(KIDIA:KFDIA)=ZTMP(KIDIA:KFDIA)+PCEN(KIDIA:KFDIA,JK,KAERO(JN))
-    !END DO
-    !PGFL(KIDIA:KFDIA,KAERO(JN),YAEROUT(13)%MP)  = ZTMP(KIDIA:KFDIA)
-    PGFL(KIDIA:KFDIA,KAERO(JN),YGFL%YAEROUT(13)%MP)= - PCFLX(KIDIA:KFDIA,KAERO(JN))* ZDPG(KIDIA:KFDIA,KLEV)
-  END DO
-
-  !** YAEROUT(14) : Total column tracer/number PREVIOUS (before call to M7) concentration
-  
-  DO JN=1,NACTAERO
-    ZTMP(KIDIA:KFDIA)=0.0_JPRB
-    DO JK=1,KLEV
-      ZTMP(KIDIA:KFDIA)=ZTMP(KIDIA:KFDIA)+ZCEN(KIDIA:KFDIA,JK,KAERO(JN))
-    END DO
-    PGFL(KIDIA:KFDIA,KAERO(JN),YAEROUT(14)%MP)  = ZTMP(KIDIA:KFDIA)
-  END DO
-
-  !** YAEROUT(15) : Total column UPDATED TENDENCIES tracer
-  
-  DO JN=1,NACTAERO
-    ZTMP(KIDIA:KFDIA)=0.0_JPRB
-    DO JK=1,KLEV
-      ZTMP(KIDIA:KFDIA)=ZTMP(KIDIA:KFDIA)+PTENC(KIDIA:KFDIA,JK,KAERO(JN))
-    END DO
-    PGFL(KIDIA:KFDIA,KAERO(JN),YAEROUT(15)%MP)  = ZTMP(KIDIA:KFDIA)
-  END DO
-
-  !** YAEROUT(16) : M7 mass and number mixing ratio at surface
-  
-  DO JN=1,NAEROCOMP    !ntrac!NACTAERO   
-    JO=ind_oifs_ham%ind_mass_OIFS(JN)  ! JO -> index context OIFS 
-    JH=ind_oifs_ham%IND_mass_HAM(JN)   ! JH -> index context HAM 
-    JY=YAEROUT(16)%MP
-    ZTMP(KIDIA:KFDIA)= ZXTM1(KIDIA:KFDIA,KLEV,JH)+(ZXTTE(KIDIA:KFDIA,KLEV,JH)*TIME_STEP_LEN)!*ZDPG(KIDIA:KFDIA,KLEV)
-    PGFL(KIDIA:KFDIA,JO,JY) = ZTMP(KIDIA:KFDIA)
-  END DO
-
-  DO JN=1,NCLASS
-    JO=ind_oifs_ham%ind_class_OIFS(JN)  ! JO -> index context OIFS 
-    JH=ind_oifs_ham%IND_class_HAM(JN)   ! JH -> index context HAM 
-    JY=YAEROUT(16)%MP
-    ZTMP(KIDIA:KFDIA) =  ZXTM1(KIDIA:KFDIA,KLEV,JH)+(ZXTTE(KIDIA:KFDIA,KLEV,JH)*TIME_STEP_LEN)!*PRHO(KIDIA:KFDIA,KLEV)
-    PGFL(KIDIA:KFDIA,JO,JY) = ZTMP(KIDIA:KFDIA)
-  END DO
-  
-  !** YAEROUT(17-18) : IN-CLOUD & BELOW CLOUD WET DEPOSITION
-  
-  DO JN=1,NACTAERO
-    PGFL(KIDIA:KFDIA,KAERO(JN),YAEROUT(17)%MP) = WDEPOUT_IC_2D(KIDIA:KFDIA,KAERO(JN))
-    PGFL(KIDIA:KFDIA,KAERO(JN),YAEROUT(18)%MP) = WDEPOUT_BC_2D(KIDIA:KFDIA,KAERO(JN))
-  END DO
-
-  !** YAEROUT(19-20) : 
-  
-  PGFL(KIDIA:KFDIA,KLEV,YAEROUT(19)%MP)   = ZXTTE(KIDIA:KFDIA,KLEV,3)      ! tendency SS CS ham after update surface
-  PGFL(KIDIA:KFDIA,KLEV-1,YAEROUT(20)%MP) = ZTENCIH(KIDIA:KFDIA,KLEV,17)   ! tendency SS CS ham before update surface
-
-  !** YAEROUT(21) :  height of each level top
-  
-  DO JK=1,KLEV
-    PGFL(KIDIA:KFDIA,JK,YAEROUT(21)%MP) = (PGEOH(KIDIA:KFDIA,JK-1)-PGEOH(KIDIA:KFDIA,KLEV))*ZRG
-  END DO
-  
-  !** YAEROUT(22-26) : Nucleation diagnostics
-  
-  PGFL(KIDIA:KFDIA,1:KLEV,YAEROUT(22)%MP) = ZOUT_dnuc(KIDIA:KFDIA,1:KLEV,1)  ! NS-mass production kg/s from nucleatiom (limited by amount of SO4)
-  PGFL(KIDIA:KFDIA,1:KLEV,YAEROUT(23)%MP) = ZOUT_dnuc(KIDIA:KFDIA,1:KLEV,2)  ! NS-number production rate #/s from nucleatiom (limited by amount of SO4 vs original #/s)
-  PGFL(KIDIA:KFDIA,1:KLEV,YAEROUT(24)%MP) = ZOUT_dnuc(KIDIA:KFDIA,1:KLEV,3)  ! original #/s  from H2SO4/H2O nucleatiom
-  PGFL(KIDIA:KFDIA,1:KLEV,YAEROUT(25)%MP) = ZOUT_dnuc(KIDIA:KFDIA,1:KLEV,4)  ! original #/s from organic nucleatiom
-  PGFL(KIDIA:KFDIA,1:KLEV,YAEROUT(26)%MP) = ZOUT_dnuc(KIDIA:KFDIA,1:KLEV,5)  ! original #/s sum from organic and vehkamäki nucleation schemes
-
-  !** YAEROUT(27) : M7 GAS MIXING RATIOS at SURFACE
-
-  DO JN=1,SUBM_NGASSPEC
-    PGFL(KIDIA:KFDIA,JN,YAEROUT(27)%MP)=zxtm1(KIDIA:KFDIA,KLEV,ind_oifs_ham%ind_gas_HAM(JN))
-  END DO
-
-  !** YAEROUT(28) :  EMISSIONS
-  
-  DO JN=1,NACTAERO
-    PGFL(KIDIA:KFDIA, JN, YAEROUT(28)%MP) = PAERSRC(KIDIA:KFDIA,KAERO(JN))
-  END DO
-
-  !** YAEROUT(29) : SURFACE EMISSIONS MODIFIED BY DRY DEPOSITION
-  
-  DO JN=1,NTRAC
-    PGFL(KIDIA:KFDIA,JN,YAEROUT(39)%MP)=ZXTEMS(KIDIA:KFDIA,JN)
-  END DO
-
-  !** YAEROUT(30) : --
-  !** YAEROUT(31) : --
-  !** YAEROUT(32) : --
-  !** YAEROUT(33) : --
-  !** YAEROUT(34) : --
-  !** YAEROUT(35) : --
-  !** YAEROUT(36) : --
-  !** YAEROUT(37) : --
-  !** YAEROUT(38) : --
-  !** YAEROUT(39) : --
-  !** YAEROUT(46) 
-  !   !---------------DUST FIELDS DIAGNOSTICS-----------------------
-  ! !** YAEROUT(47) : --
-  ! !3D Dust DU_AI in KG/M3
+  !---------------DUST FIELDS DIAGNOSTICS-----------------------
+  ! ** YAEROUT(47) : --
+  ! 3D Dust DU_AI in KG/M3
   !  JO=  20 ! JO -> index context OIFS``
   !  JH=  20  ! JH -> index context HAM
   !  JY=YAEROUT(47)%MP
@@ -2067,8 +1976,8 @@ IF(.NOT.LIFSMIN  .AND. .NOT.LIFSTRAJ) THEN
   !  END DO
    
 
-  !  ! ** YAEROUT(48) : -- 
-  ! !DU_CI
+  !  ** YAEROUT(48) : -- 
+  !  DU_CI
   !  JO=  26 ! JO -> index context OIFS``
   !  JH=  21  ! JH -> index context HAM
   !  JY=YAEROUT(48)%MP
@@ -2076,8 +1985,8 @@ IF(.NOT.LIFSMIN  .AND. .NOT.LIFSTRAJ) THEN
   !    PGFL(KIDIA:KFDIA,JK,JY)=  (ZXTM1(KIDIA:KFDIA,JK,JH)+(ZXTTE(KIDIA:KFDIA,JK,JH)*TIME_STEP_LEN)) * ZDPG(KIDIA:KFDIA,JK)
   !  END DO
 
-  ! ! **YAEROUT(49)
-  !  !DU_AI NUM
+  !  **YAEROUT(49)
+  ! DU_AI NUM
   !  JO=  19 ! JO -> index context OIFS``
   !  JH=  27  ! JH -> index context HAM
   !  JY=YAEROUT(49)%MP
@@ -2085,8 +1994,8 @@ IF(.NOT.LIFSMIN  .AND. .NOT.LIFSTRAJ) THEN
   !    PGFL(KIDIA:KFDIA,JK,JY)=  ZXTM1(KIDIA:KFDIA,JK,JH)+(ZXTTE(KIDIA:KFDIA,JK,JH)*TIME_STEP_LEN)
   !  END DO
   
-  !  ! **YAEROUT(50)
-  !  !DU_CI NUM
+  !  **YAEROUT(50)
+  !  DU_CI NUM
   !  JO=  25 ! JO -> index context OIFS``
   !  JH=  28  ! JH -> index context HAM
   !  JY=YAEROUT(50)%MP
