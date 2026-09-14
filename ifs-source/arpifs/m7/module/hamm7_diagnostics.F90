@@ -150,6 +150,7 @@ CONTAINS
     REAL(KIND=JPRB) :: ZAOD_SUM_MODE(KLON), ZAOD_SUM_TRACER(KLON), ZAOD_SUM_SPECIES(KLON)
     REAL(KIND=JPRB), PARAMETER :: ZAODCHK_TOL=1.0E-6_JPRB
     LOGICAL :: LLAOD_NEG
+    LOGICAL :: LLFOUND550
 
     ASSOCIATE(YAEROUT => YDMODEL%YRML_GCONF%YGFL%YAEROUT, &
             & NAERO_WVL_DIAG => YDMODEL%YRML_GCONF%YGFL%NAERO_WVL_DIAG)
@@ -160,12 +161,21 @@ CONTAINS
       ! Normally IW550 is the 1st index, but it is added a checker to be sure 
       ! in case of silent changes that can break the logic. 
       IW550 = 1
+      LLFOUND550 = .FALSE.
       DO IW=1,NAERO_WVL_DIAG
         IF (YDMODEL%YRML_GCONF%YGFL%YAERO_WVL_DIAG_NL(IW)%IWVL == 550) THEN
           IW550 = IW
+          LLFOUND550 = .TRUE.
           EXIT
         ENDIF
       ENDDO
+      IF (.NOT. LLFOUND550) THEN
+        WRITE(NULOUT,*) 'HAMM7_INTERFACE WARNING: 550nm not found in YAERO_WVL_DIAG_NL -- ', &
+             & 'YAEROUT(30)/(31)/(32) per-mode/tracer/species AOD will use index 1 ', &
+             & '(IWVL=', YDMODEL%YRML_GCONF%YGFL%YAERO_WVL_DIAG_NL(1)%IWVL, &
+             & 'nm) mislabeled as 550nm'
+        ! (RCHG) -> Maybe it is better a call abor1
+      ENDIF
 
       DO JCLASS=1,nclass
         PGFL(KIDIA:KFDIA, JCLASS, YAEROUT(30)%MP) = PAOD_DIAG_MODE(KIDIA:KFDIA,IW550,JCLASS)
