@@ -1,3 +1,49 @@
+! ╭────────────────────────────────────────────────────────────────────────────╮
+! │                                                      (updated 10-Sep-2026) │
+! │ Purpose :                                                                  │
+! │ -------                                                                    │
+! │  *hamm7_diagnostics* - YAEROUT store of M7 diagnostics                     │
+! │                                                                            │
+! │                                                                            │
+! │ Interface :                                                                │
+! │ ---------                                                                  │
+! │   *HAMM7_DIAGNOSTICS" is called from HAMM7_INTERFACE                       │
+! │                                                                            │
+! │                                                                            │
+! │ Input :                                                                    │
+! │ -----                                                                      │
+! │   The specific inputs depends on the subroutine used for storing diags.    │
+! │                                                                            │
+! │ Output :                                                                   │
+! │ ------                                                                     │
+! │   The subroutines fill PGFL <-> YAEROUT                                    │
+! │                                                                            │
+! │ Externals :                                                                │
+! │ ---------                                                                  │
+! │                                                                            │
+! │ Method :                                                                   │
+! │ ------                                                                     │
+! │                                                                            │
+! │ Reference :                                                                │
+! │ ---------                                                                  │
+! │                                                                            │
+! │ Author :                                                                   │
+! │ -------                                                                    │
+! │     Original version are lines in hamm7_interface that were added here     │
+! │     other than aod diagnostics. This can involve:                          │
+! │     Vincent Huijen (KNMI), Tommi Bergman (FMI), Lianghai Wu (KNMI),        │
+! │     Philippe Le Sager (KNMI)                                               │
+! │                                                                            │
+! │     The previous code in hamm7_interface has been moved here, refactored   │
+! │     add the AOD diagnostics and commented by R.Checa-Garcia (KNMI)         │
+! │ Modifications :                                                            │
+! │ -------------                                                              │
+! │     Sep.  2026 - R. Checa-Garcia: moved diagnostics to external and added  │
+! │     May.  2024 - R. Checa-Garcia: revision for CY48r1 and refactoring      │
+! │                                   a AOD per species/modes/tracers.         │
+! ╰────────────────────────────────────────────────────────────────────────────╯
+
+
 MODULE HAMM7_DIAGNOSTICS
   ! Explicit-argument diagnostics subrou. extracted from HAMM7_INTERFACE
   ! (see hamm7_interface_struc.F90). 
