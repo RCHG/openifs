@@ -93,6 +93,7 @@ MODULE HAMM7_DIAGNOSTICS
   !   YAEROUT(30)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per M7 mode @550nm, or other WL in NAERO_WVL_DIAG)
   !   YAEROUT(31)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per tracer @550nm, or other WL in NAERO_WVL_DIAG)
   !   YAEROUT(32)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per chemical species @550nm, or other WL in NAERO_WVL_DIAG)
+  !   YAEROUT(33)    -> WRITE_OPTICAL_DIAGNOSTICS    (AOD per M7 mode attributable to aerosol water @550nm)
   !   YAEROUT(33-38) -> empty ("--" placeholder comments only)
   !   YAEROUT(39)    -> WRITE_EMISSION_DIAGNOSTICS   (actual target of YAEROUT(29)'s write, see above)
   !   YAEROUT(40-45) -> commented-out (SimChem: ZFSO2/ZFSO4/ZFSO4_AQ/ZTSO4/ZTSO4_AQ/ZTSO2)
@@ -214,6 +215,11 @@ CONTAINS
       ELSE
         WRITE(NULOUT,*) 'HAMM7_INTERFACE WARNING: no soluble mode found -- WAT AOD not added to YAEROUT(32)'
       ENDIF
+
+      !** YAEROUT(33) : water AOD per M7 mode 
+      DO JCLASS=1,nclass
+        PGFL(KIDIA:KFDIA, JCLASS, YAEROUT(33)%MP) = PAOD_DIAG_WATER(KIDIA:KFDIA,IW_STORE,JCLASS)
+      END DO
 
       !** Consistency check
       ZAOD_SUM_MODE(KIDIA:KFDIA)    = SUM(PAOD_DIAG_MODE(KIDIA:KFDIA,IW_STORE,1:nclass),      DIM=2)
@@ -799,7 +805,8 @@ END MODULE HAMM7_DIAGNOSTICS
 !               So: 
 !               YAEROUT(30) -> 7 values (modes)
 !               YAEROUT(31) -> 18 tracers, one per (species,mode)
-!               YAEROUT(32) -> 5 species, ISPID 9-13.
+!               YAEROUT(32) -> 6 species, ISPID 9-13 (dry) + 14 (WAT) 
+!               YAEROUT(33) -> 7 values (modes)  WAT AOD per mode
 !
 !               The SOA_NS/KS/AS/CS/KI, ELVOC/ISVOC/MSA tracers seen in some YAERO_NL
 !               namelists do NOT appear in aerocomp at all: their species (mo_ham_soa.F90,

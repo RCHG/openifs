@@ -1559,7 +1559,7 @@ CONTAINS
           ! (RChG) as explained above we do a split each mode's per-level AOD 
           ! (zaer_tau_diag_vr) between its tracers by volume fraction at that level, 
           ! then integrate over levels. Note that the per-level weighting the
-          ! is kept for tracers instead of summing straight to pure-species totals.
+          ! is kept for tracers instead of summing to pure-species totals.
           DO jn=1,naerocomp
              IF (nrad(aerocomp(jn)%iclass) > 0) THEN
                 jt     = aerocomp(jn)%idt
